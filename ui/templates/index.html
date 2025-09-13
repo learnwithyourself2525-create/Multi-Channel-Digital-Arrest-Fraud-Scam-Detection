@@ -1,0 +1,216 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Multi-Channel Scam Detector</title>
+    <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+    <div class="container">
+        <h1>Multi-Channel Scam Detector</h1>
+        <div class="main-content">
+            <div class="card">
+                <h2>Text Analysis</h2>
+                <textarea id="text-input" placeholder="Enter text (SMS, email, etc.) to analyze..."></textarea>
+                <button onclick="analyzeText()">Analyze Text</button>
+            </div>
+
+            <div class="card">
+                <h2>Audio Analysis</h2>
+                <input type="file" id="audio-input" accept="audio/*">
+                <button onclick="analyzeAudio()">Analyze Audio</button>
+            </div>
+
+            <div class="card">
+                <h2>Video Analysis (Upload File)</h2>
+                <input type="file" id="video-input" accept="video/*">
+                <button onclick="analyzeVideo()">Analyze Video</button>
+            </div>
+
+            <div class="card">
+                <h2>Live Video Feed (Webcam)</h2>
+                <video id="video-feed" width="320" height="240" autoplay muted playsinline></video>
+                <button id="start-video-btn" onclick="toggleVideoStream()">Start Video Stream</button>
+            </div>
+        </div>
+        <div class="card alerts-container">
+            <h2>Real-Time Alerts</h2>
+            <div id="alerts"><p>Alerts will appear here...</p></div>
+        </div>
+    </div>
+
+    <script>
+        const alertsDiv = document.getElementById('alerts');
+        let alertSocket;
+        let videoSocket;
+        let videoInterval;
+
+        function connectAlertSocket() {
+            if (alertSocket && alertSocket.readyState === WebSocket.OPEN) return;
+            alertSocket = new WebSocket(`ws://${window.location.host}/ws/alerts`);
+            
+            alertSocket.onopen = () => console.log("Alerts WebSocket connection established.");
+            alertSocket.onmessage = (event) => {
+                const data = JSON.parse(event.data);
+                displayAlert(data);
+            };
+            alertSocket.onclose = () => {
+                console.log("Alerts WebSocket connection closed. Reconnecting...");
+                setTimeout(connectAlertSocket, 2000);
+            };
+            alertSocket.onerror = (error) => console.error("Alerts WebSocket Error:", error);
+        }
+
+        function displayAlert(data) {
+            const firstAlert = alertsDiv.querySelector('p');
+            if (firstAlert) firstAlert.remove();
+
+            const alertElement = document.createElement('div');
+            alertElement.classList.add('alert');
+            
+            let content = `<strong>Analysis Type: ${data.type.replace('_', ' ')}</strong><br>`;
+            const result = data.result;
+
+            if (data.type === 'text_analysis') {
+                const isScam = result.is_scam;
+                const confidence = (result.confidence * 100).toFixed(2);
+                const risky = result.risky_keywords && result.risky_keywords.length > 0 
+                    ? ` | Triggered by: ${result.risky_keywords.join(", ")}` 
+                    : "";
+
+                alertElement.classList.add(isScam ? 'scam' : 'not-scam');
+                content += `Prediction: <strong>${isScam ? '⚠️ SCAM' : '✅ NOT SCAM'}</strong> 
+                            | Confidence: ${confidence}% ${risky}`;
+            } 
+            else if (data.type === 'audio_analysis') {
+                if(result.error) {
+                    content += `Error: ${result.error}`;
+                    alertElement.classList.add('scam');
+                } else {
+                    const isScam = result.scam_analysis.is_scam;
+                    const confidence = (result.scam_analysis.confidence * 100).toFixed(2);
+                    const risky = result.scam_analysis.risky_keywords && result.scam_analysis.risky_keywords.length > 0 
+                        ? ` | Triggered by: ${result.scam_analysis.risky_keywords.join(", ")}` 
+                        : "";
+
+                    alertElement.classList.add(isScam ? 'scam' : 'not-scam');
+                    content += `Transcription: "<em>${result.transcription}</em>"<br>`;
+                    content += `Prediction: <strong>${isScam ? '⚠️ SCAM' : '✅ NOT SCAM'}</strong> 
+                                | Confidence: ${confidence}% ${risky}`;
+                }
+            } 
+            else if (data.type === 'video_analysis') {
+                if (result.face_detected) {
+                    content += `Face Detected | Confidence: ${(result.confidence * 100).toFixed(2)}%`;
+                    alertElement.classList.add('not-scam');
+                } else if (result.frame_checks || result.audio_analysis) {
+                    content += `<pre>${JSON.stringify(result, null, 2)}</pre>`;
+                } else {
+                    return;
+                }
+            }
+
+            alertElement.innerHTML = content;
+            alertsDiv.prepend(alertElement);
+        }
+
+        async function analyzeText() {
+            const text = document.getElementById('text-input').value;
+            if (!text) return;
+            await fetch("/analyze/text", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ text: text })
+            });
+        }
+
+        async function analyzeAudio() {
+            const fileInput = document.getElementById('audio-input');
+            const file = fileInput.files[0];
+            if (!file) return;
+
+            const formData = new FormData();
+            formData.append("file", file);
+
+            await fetch("/analyze/audio", {
+                method: "POST",
+                body: formData
+            });
+        }
+
+        async function analyzeVideo() {
+            const fileInput = document.getElementById('video-input');
+            const file = fileInput.files[0];
+            if (!file) return;
+
+            const formData = new FormData();
+            formData.append("file", file);
+
+            await fetch("/analyze/video", {
+                method: "POST",
+                body: formData
+            });
+        }
+
+        function toggleVideoStream() {
+            if (videoSocket && videoSocket.readyState === WebSocket.OPEN) {
+                stopVideoStream();
+            } else {
+                startVideoStream();
+            }
+        }
+        
+        function startVideoStream() {
+            const videoElement = document.getElementById('video-feed');
+            const videoButton = document.getElementById('start-video-btn');
+
+            navigator.mediaDevices.getUserMedia({ video: true })
+                .then(stream => {
+                    videoElement.srcObject = stream;
+                    videoSocket = new WebSocket(`ws://${window.location.host}/ws/video`);
+
+                    videoSocket.onopen = () => {
+                        console.log("Video WebSocket connection established.");
+                        videoButton.textContent = "Stop Video Stream";
+                        videoInterval = setInterval(() => {
+                            if (videoSocket.readyState === WebSocket.OPEN) {
+                                const canvas = document.createElement('canvas');
+                                canvas.width = videoElement.videoWidth;
+                                canvas.height = videoElement.videoHeight;
+                                canvas.getContext('2d').drawImage(videoElement, 0, 0, canvas.width, canvas.height);
+                                canvas.toBlob(blob => {
+                                    if (blob) videoSocket.send(blob);
+                                }, 'image/jpeg');
+                            }
+                        }, 1000);
+                    };
+
+                    videoSocket.onclose = () => {
+                        console.log("Video WebSocket connection closed.");
+                        stopVideoStream();
+                    };
+                })
+                .catch(err => {
+                    console.error("Error accessing camera:", err);
+                    alert("Could not access camera. Please check permissions.");
+                });
+        }
+
+        function stopVideoStream() {
+            const videoElement = document.getElementById('video-feed');
+            const videoButton = document.getElementById('start-video-btn');
+
+            if (videoInterval) clearInterval(videoInterval);
+            if (videoSocket) videoSocket.close();
+            if (videoElement.srcObject) {
+                videoElement.srcObject.getTracks().forEach(track => track.stop());
+                videoElement.srcObject = null;
+            }
+            videoButton.textContent = "Start Video Stream";
+        }
+        
+        window.onload = connectAlertSocket;
+    </script>
+</body>
+</html>
